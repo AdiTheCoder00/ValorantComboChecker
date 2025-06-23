@@ -96,7 +96,7 @@ class ComboChecker:
                 result['status'] = 'rate_limited'
                 result['message'] = 'Rate limited - try again later'
                 
-            elif response.status_code in [401, 403]:
+            elif response.status_code in [400, 401, 403]:
                 result['status'] = 'invalid'
                 result['message'] = 'Invalid credentials'
                 
