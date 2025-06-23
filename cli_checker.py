@@ -11,6 +11,8 @@ Unauthorized access to accounts is illegal and violates terms of service.
 import sys
 import time
 import os
+import tkinter as tk
+from tkinter import filedialog
 from combo_checker import ComboChecker
 from utils import validate_email, format_duration
 
@@ -67,20 +69,60 @@ def single_check():
     
     return result
 
+def select_file():
+    """Open file browser to select combo file"""
+    print("Opening file browser... (a small window will appear)")
+    
+    # Create a hidden root window
+    root = tk.Tk()
+    root.withdraw()  # Hide the main window
+    root.attributes('-topmost', True)  # Bring to front
+    
+    # Open file dialog
+    file_path = filedialog.askopenfilename(
+        title="Select your combo file",
+        filetypes=[
+            ("Text files", "*.txt"),
+            ("CSV files", "*.csv"), 
+            ("All files", "*.*")
+        ],
+        initialdir=os.getcwd()
+    )
+    
+    root.destroy()  # Clean up
+    return file_path
+
 def batch_check():
     """Check multiple accounts from file"""
     print("\n" + "-"*40)
     print("BATCH ACCOUNT CHECK")
     print("-"*40)
     
-    file_path = input("Enter path to combo file: ").strip()
-    if not file_path:
-        print("Error: File path cannot be empty")
+    print("Choose how to select your combo file:")
+    print("1. Browse with file explorer (recommended)")
+    print("2. Type file path manually")
+    
+    choice = input("Enter choice (1 or 2): ").strip()
+    
+    if choice == "1":
+        file_path = select_file()
+        if not file_path:
+            print("No file selected. Returning to main menu.")
+            return
+    elif choice == "2":
+        file_path = input("Enter path to combo file: ").strip()
+        if not file_path:
+            print("Error: File path cannot be empty")
+            return
+    else:
+        print("Invalid choice. Returning to main menu.")
         return
         
     if not os.path.exists(file_path):
         print(f"Error: File '{file_path}' not found")
         return
+    
+    print(f"Selected file: {os.path.basename(file_path)}")
     
     try:
         checker = ComboChecker()
@@ -170,20 +212,64 @@ def batch_check():
         print(f"Error during batch check: {e}")
         return None
 
+def save_file_dialog():
+    """Open save file dialog"""
+    print("Opening save dialog... (a small window will appear)")
+    
+    # Create a hidden root window
+    root = tk.Tk()
+    root.withdraw()  # Hide the main window
+    root.attributes('-topmost', True)  # Bring to front
+    
+    # Open save dialog
+    file_path = filedialog.asksaveasfilename(
+        title="Save results as...",
+        defaultextension=".txt",
+        filetypes=[
+            ("Text files", "*.txt"),
+            ("CSV files", "*.csv"),
+            ("All files", "*.*")
+        ],
+        initialdir=os.getcwd(),
+        initialfile="valorant_results.txt"
+    )
+    
+    root.destroy()  # Clean up
+    return file_path
+
 def export_results(results):
     """Export results to file"""
     if not results:
         print("No results to export")
         return
     
-    filename = input("Enter filename (default: valorant_results.txt): ").strip()
-    if not filename:
-        filename = "valorant_results.txt"
+    print("Choose how to save your results:")
+    print("1. Browse with file explorer (recommended)")
+    print("2. Type filename manually")
+    
+    choice = input("Enter choice (1 or 2): ").strip()
+    
+    if choice == "1":
+        filename = save_file_dialog()
+        if not filename:
+            print("Save cancelled.")
+            return
+    elif choice == "2":
+        filename = input("Enter filename (default: valorant_results.txt): ").strip()
+        if not filename:
+            filename = "valorant_results.txt"
+    else:
+        print("Invalid choice.")
+        return
+    
+    # Determine file format from extension
+    file_format = 'csv' if filename.lower().endswith('.csv') else 'txt'
     
     try:
         checker = ComboChecker()
-        checker.export_results(results, filename, 'txt')
+        checker.export_results(results, filename, file_format)
         print(f"Results exported to: {filename}")
+        print(f"Format: {file_format.upper()}")
     except Exception as e:
         print(f"Error exporting results: {e}")
 
