@@ -1,0 +1,9 @@
+# Sample combo file for testing
+# Format: username:password (one per line)
+# Lines starting with # are comments
+
+test_user1@example.com:password123
+demo_account@gmail.com:demo_pass
+sample_user:test_password
+invalid_email:weak_pass
+user@domain.com:strong_password456
