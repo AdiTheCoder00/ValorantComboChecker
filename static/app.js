@@ -3,6 +3,8 @@ class ValorantComboChecker {
     constructor() {
         this.currentSessionId = null;
         this.isChecking = false;
+        this.startTime = null;
+        this.lastProgressUpdate = null;
         this.initializeEventListeners();
     }
 
@@ -168,9 +170,15 @@ class ValorantComboChecker {
 
     async startBatchCheck() {
         const delay = parseFloat(document.getElementById('delay').value);
+        const maxWorkers = parseInt(document.getElementById('maxWorkers').value);
         
         if (delay < 0.1 || delay > 10) {
             this.showAlert('Delay must be between 0.1 and 10 seconds', 'warning');
+            return;
+        }
+        
+        if (maxWorkers < 1 || maxWorkers > 20) {
+            this.showAlert('Concurrent threads must be between 1 and 20', 'warning');
             return;
         }
 
@@ -190,7 +198,7 @@ class ValorantComboChecker {
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({ delay })
+                body: JSON.stringify({ delay, max_workers: maxWorkers })
             });
 
             const result = await response.json();
@@ -198,6 +206,8 @@ class ValorantComboChecker {
             if (response.ok) {
                 this.currentSessionId = result.session_id;
                 this.isChecking = true;
+                this.startTime = Date.now();
+                this.lastProgressUpdate = 0;
                 
                 // Update UI
                 startBtn.style.display = 'none';
@@ -211,7 +221,7 @@ class ValorantComboChecker {
                 // Start polling for updates
                 this.pollBatchStatus();
                 
-                this.showAlert(`Batch check started! Processing ${result.total_combos} combinations.`, 'success');
+                this.showAlert(`Batch check started! Processing ${result.total_combos} combinations with ${result.max_workers} concurrent threads.`, 'success');
             } else {
                 this.showAlert(result.error || 'Failed to start batch check', 'danger');
             }
@@ -283,6 +293,13 @@ class ValorantComboChecker {
         document.getElementById('validCount').textContent = validCount;
         document.getElementById('invalidCount').textContent = invalidCount;
         document.getElementById('errorCount').textContent = errorCount;
+        
+        // Calculate and display checking rate per minute
+        if (this.startTime && progress.current > 0) {
+            const elapsedMinutes = (Date.now() - this.startTime) / 60000;
+            const checksPerMinute = elapsedMinutes > 0 ? Math.round(progress.current / elapsedMinutes) : 0;
+            document.getElementById('checkRate').textContent = checksPerMinute;
+        }
         
         // Update live results
         this.updateLiveResults(results);

