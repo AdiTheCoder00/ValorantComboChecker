@@ -84,6 +84,9 @@ class ComboChecker:
             'average_response_time': 0.0,
             'response_times': []
         }
+        self.proxy_list = []
+        self.current_proxy_index = 0
+        self.proxy_rotation_enabled = False
         
     def check_single_combo(self, username: str, password: str) -> Dict:
         """Check a single username/password combination"""
@@ -536,6 +539,112 @@ def export_results(session_id):
         }
         
         return jsonify(export_data)
+
+# Advanced Features Routes
+
+@app.route('/api/proxy_test')
+def test_proxy():
+    """Test proxy functionality"""
+    proxy_url = request.args.get('proxy')
+    if not proxy_url:
+        return jsonify({'error': 'No proxy provided'}), 400
+    
+    try:
+        proxies = {'http': proxy_url, 'https': proxy_url}
+        response = requests.get('https://httpbin.org/ip', proxies=proxies, timeout=10)
+        return jsonify({
+            'success': True,
+            'ip': response.json().get('origin'),
+            'response_time': response.elapsed.total_seconds()
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/session_history')
+def get_session_history():
+    """Get history of all sessions"""
+    history = []
+    for session_id, checker in active_sessions.items():
+        history.append({
+            'session_id': session_id,
+            'total_checked': len(checker.results),
+            'valid_count': checker.progress.get('valid_count', 0),
+            'success_rate': checker.progress.get('success_rate', 0),
+            'is_active': checker.is_checking,
+            'created': checker.session_stats.get('start_time')
+        })
+    
+    return jsonify({'sessions': history})
+
+@app.route('/api/duplicate_check', methods=['POST'])
+def check_duplicates():
+    """Check for duplicate combos in uploaded file"""
+    if 'uploaded_file' not in session:
+        return jsonify({'error': 'No file uploaded'}), 400
+    
+    file_path = session['uploaded_file']
+    try:
+        combos = parse_combo_file(file_path)
+        unique_combos = []
+        seen = set()
+        duplicates = []
+        
+        for username, password in combos:
+            combo_key = f"{username}:{password}".lower()
+            if combo_key in seen:
+                duplicates.append(f"{username}:{password}")
+            else:
+                seen.add(combo_key)
+                unique_combos.append((username, password))
+        
+        return jsonify({
+            'total_combos': len(combos),
+            'unique_combos': len(unique_combos),
+            'duplicates_found': len(duplicates),
+            'duplicate_list': duplicates[:10],  # First 10 duplicates
+            'duplicate_percentage': (len(duplicates) / len(combos)) * 100 if combos else 0
+        })
+        
+    except Exception as e:
+        return jsonify({'error': f'Error checking duplicates: {str(e)}'}), 500
+
+@app.route('/api/smart_retry/<session_id>', methods=['POST'])
+def smart_retry(session_id):
+    """Retry failed/error combos with smart logic"""
+    if session_id not in active_sessions:
+        return jsonify({'error': 'Session not found'}), 404
+    
+    checker = active_sessions[session_id]
+    if checker.is_checking:
+        return jsonify({'error': 'Session is currently checking'}), 400
+    
+    # Find failed combos
+    failed_combos = [
+        (r['username'], r['password']) 
+        for r in checker.results 
+        if r['status'] in ['error', 'timeout']
+    ]
+    
+    if not failed_combos:
+        return jsonify({'error': 'No failed combos to retry'}), 400
+    
+    # Create new session for retry
+    retry_session_id = f"{session_id}_retry_{int(time.time())}"
+    retry_checker = ComboChecker(retry_session_id, checker.delay, checker.max_workers)
+    active_sessions[retry_session_id] = retry_checker
+    
+    # Start retry in background
+    def retry_thread():
+        retry_checker.check_combo_list(failed_combos)
+    
+    thread = threading.Thread(target=retry_thread, daemon=True)
+    thread.start()
+    
+    return jsonify({
+        'success': True,
+        'retry_session_id': retry_session_id,
+        'retry_count': len(failed_combos)
+    })
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
