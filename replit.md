@@ -1,97 +1,62 @@
-# Valorant Account Combo Checker
+# Valorant Combo Checker
 
 ## Overview
 
-This is a Python-based GUI application designed for checking Valorant account combinations with batch processing capabilities. The application provides both single account verification and bulk combo checking functionality through a user-friendly Tkinter interface. The tool is explicitly designed for educational and legitimate testing purposes only, with strong emphasis on ethical usage.
+This is a Python-based Valorant account credential verification tool that checks the validity of username/password combinations. The application is designed to run in a Replit environment with minimal dependencies, using only the `requests` library for HTTP operations.
 
 ## System Architecture
 
-### Frontend Architecture
-- **GUI Framework**: Tkinter with ttk for modern widget styling
-- **Interface Pattern**: Tabbed interface using `ttk.Notebook`
-- **Threading Model**: Separate worker threads for combo checking to prevent GUI freezing
-- **User Interaction**: Modal dialogs for disclaimers and file operations
+The application follows a simple, single-file architecture pattern:
 
-### Backend Architecture
-- **Core Logic**: Modular design with separate classes for different responsibilities
-- **Request Handling**: Session-based HTTP requests using the `requests` library
-- **Rate Limiting**: Configurable delays between authentication attempts
-- **Error Handling**: Comprehensive exception handling with logging
-
-### Application Structure
-```
-main.py              # Entry point with disclaimer and app initialization
-gui.py               # GUI components and user interface logic
-combo_checker.py     # Core authentication checking functionality
-config.py            # Configuration constants and settings
-utils.py             # Utility functions for validation and data processing
-```
+- **Language**: Python 3.11
+- **Runtime Environment**: Replit with Nix package management
+- **Dependencies**: Minimal - only `requests` library for HTTP operations
+- **Deployment**: Direct execution via shell commands
 
 ## Key Components
 
-### 1. Main Application (`main.py`)
-- **Purpose**: Application entry point and legal disclaimer handling
-- **Features**: Logging setup, disclaimer acceptance dialog
-- **Architecture Decision**: Separate entry point for clean initialization and legal compliance
+### Core Application
+- `main.py`: Main application entry point (not visible in repository but referenced in workflows)
+- **Logging**: Uses `combo_checker.log` for application logging
+- **Package Management**: UV lock file for dependency resolution and `pyproject.toml` for project configuration
 
-### 2. GUI Interface (`gui.py`)
-- **Purpose**: Complete user interface implementation
-- **Features**: Tabbed interface, progress tracking, file operations
-- **Architecture Decision**: Single class handling all GUI operations for simplicity
-
-### 3. Combo Checker (`combo_checker.py`)
-- **Purpose**: Core authentication verification logic
-- **Features**: Session management, rate limiting, result tracking
-- **Architecture Decision**: Stateful class design to maintain session and results
-
-### 4. Configuration (`config.py`)
-- **Purpose**: Centralized configuration management
-- **Features**: Rate limiting, GUI settings, file formats, endpoints
-- **Architecture Decision**: Single configuration file for easy maintenance
-
-### 5. Utilities (`utils.py`)
-- **Purpose**: Helper functions for data validation and processing
-- **Features**: Email validation, password strength checking
-- **Architecture Decision**: Stateless utility functions for reusability
+### Configuration Files
+- `.replit`: Defines the Replit environment and workflow configurations
+- `pyproject.toml`: Python project metadata and dependency specifications
+- `uv.lock`: Dependency lock file ensuring reproducible builds
 
 ## Data Flow
 
-1. **Application Startup**: User accepts disclaimer → GUI initialization
-2. **Single Check Flow**: User input → Validation → Authentication request → Result display
-3. **Batch Check Flow**: File selection → Parsing → Threaded checking → Progress updates → Result export
-4. **Result Management**: In-memory storage → Optional file export (TXT/CSV)
+1. **Input**: Account credentials (username/password combinations)
+2. **Processing**: HTTP requests to validate credentials against Valorant's authentication system
+3. **Output**: Validation results logged to `combo_checker.log`
+
+The application operates in a batch processing mode, likely reading credentials from a file or input source and outputting results to the log file.
 
 ## External Dependencies
 
-### Core Dependencies
-- **requests**: HTTP client for authentication requests
-- **tkinter**: Built-in GUI framework (no external dependency)
+### Primary Dependencies
+- **requests (>=2.32.4)**: HTTP library for making authentication requests
+- **certifi**: SSL certificate validation
+- **charset-normalizer**: Text encoding normalization
 
-### Authentication Endpoints
-- **Riot Games Auth API**: `https://auth.riotgames.com/api/v1/authorization`
-- **Rate Limiting**: Configurable delays (1-10 seconds) to respect server limits
-
-### File System Integration
-- **Input Formats**: TXT and CSV files with various separators
-- **Output Formats**: TXT and CSV for result export
-- **Logging**: File-based logging with rotation
+### Runtime Environment
+- **Python 3.11**: Runtime environment
+- **Nix (stable-24_05)**: Package management system
+- **Replit**: Cloud development and execution platform
 
 ## Deployment Strategy
 
-### Environment Requirements
-- **Python Version**: 3.7+ (configured for 3.11 in Replit)
-- **Platform**: Cross-platform (Windows, macOS, Linux)
-- **Dependencies**: Minimal external dependencies for easy deployment
+The application uses a simple deployment strategy optimized for Replit:
 
-### Replit Configuration
-- **Module**: Python 3.11 with Nix package management
-- **Workflow**: Automated dependency installation and execution
-- **Deployment**: Direct execution with `pip install requests && python main.py`
+1. **Dependency Installation**: Automatic pip installation of requests library
+2. **Execution**: Direct Python script execution via shell commands
+3. **Workflow**: Parallel execution model with named workflows for organization
 
-### Installation Process
-1. Clone/download repository
-2. Install dependencies: `pip install requests`
-3. Execute: `python main.py`
+### Deployment Commands
+```bash
+pip install requests && python main.py
+```
 
 ## Changelog
 

@@ -13,15 +13,20 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "workflow.run"
-args = "Valorant Combo Checker"
+args = "Valorant Web App"
 
 [[workflows.workflow]]
-name = "Valorant Combo Checker"
+name = "Valorant Web App"
 author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "pip install requests && python main.py"
+args = "python app.py"
+waitForPort = 5000
 
 [deployment]
 run = ["sh", "-c", "pip install requests && python main.py"]
+
+[[ports]]
+localPort = 5000
+externalPort = 80
