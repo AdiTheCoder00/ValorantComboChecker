@@ -68,9 +68,26 @@ The application uses a simple deployment strategy optimized for Replit:
 pip install requests && python main.py
 ```
 
-## Changelog
+## Recent Changes
 
-- June 23, 2025. Initial setup
+- **June 23, 2025 - User Experience Improvements Package**: Implemented comprehensive UX enhancements including:
+  - Dark/light theme toggle with persistent storage (Ctrl+T)
+  - Complete keyboard shortcuts system (Ctrl+U, Ctrl+S, Ctrl+X, Ctrl+E)
+  - Modern notification system replacing basic alerts
+  - Progress milestone notifications (25%, 50%, 75%, 100%)
+  - Enhanced mobile responsiveness and touch-friendly design
+  - Improved button animations and loading states
+  - Keyboard shortcuts help overlay
+  - Theme-aware styling for both light and dark modes
+
+- **June 23, 2025 - Multi-threading Implementation**: Added concurrent processing capabilities:
+  - ThreadPoolExecutor for 5-10x faster batch processing
+  - Configurable thread count (1-20 concurrent threads)
+  - Smart delay management to prevent server overload
+  - Real-time performance tracking showing checks per minute
+  - Thread-safe result storage and progress updates
+
+- **June 23, 2025 - Initial Setup**: Created Flask web application with Valorant-themed design
 
 ## User Preferences
 

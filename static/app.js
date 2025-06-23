@@ -5,7 +5,9 @@ class ValorantComboChecker {
         this.isChecking = false;
         this.startTime = null;
         this.lastProgressUpdate = null;
+        this.currentTheme = localStorage.getItem('theme') || 'dark';
         this.initializeEventListeners();
+        this.initializeTheme();
     }
 
     initializeEventListeners() {
@@ -37,6 +39,117 @@ class ValorantComboChecker {
         document.getElementById('exportBtn').addEventListener('click', () => {
             this.exportResults();
         });
+        
+        // Theme toggle
+        document.getElementById('themeToggle').addEventListener('click', () => {
+            this.toggleTheme();
+        });
+        
+        // Initialize keyboard shortcuts
+        this.initializeKeyboardShortcuts();
+    }
+    
+    initializeKeyboardShortcuts() {
+        document.addEventListener('keydown', (e) => {
+            if (e.ctrlKey) {
+                switch(e.key.toLowerCase()) {
+                    case 't':
+                        e.preventDefault();
+                        this.toggleTheme();
+                        break;
+                    case 'u':
+                        e.preventDefault();
+                        document.getElementById('comboFile').click();
+                        break;
+                    case 's':
+                        e.preventDefault();
+                        if (!this.isChecking) {
+                            const startBtn = document.getElementById('startBatchBtn');
+                            if (startBtn.style.display !== 'none') {
+                                this.startBatchCheck();
+                            }
+                        }
+                        break;
+                    case 'x':
+                        e.preventDefault();
+                        if (this.isChecking) {
+                            this.stopBatchCheck();
+                        }
+                        break;
+                    case 'e':
+                        e.preventDefault();
+                        this.exportResults();
+                        break;
+                }
+            }
+        });
+        
+        // Show shortcuts help after a delay
+        setTimeout(() => {
+            this.showShortcutsHelp();
+        }, 2000);
+    }
+    
+    showShortcutsHelp() {
+        const helpDiv = document.getElementById('shortcutsHelp');
+        helpDiv.classList.add('show');
+        
+        setTimeout(() => {
+            helpDiv.classList.remove('show');
+        }, 4000);
+    }
+    
+    toggleTheme() {
+        this.currentTheme = this.currentTheme === 'dark' ? 'light' : 'dark';
+        this.applyTheme(this.currentTheme);
+        localStorage.setItem('theme', this.currentTheme);
+        this.showNotification(`Switched to ${this.currentTheme} theme`, 'success');
+    }
+    
+    applyTheme(theme) {
+        document.documentElement.setAttribute('data-theme', theme);
+        const themeIcon = document.getElementById('themeIcon');
+        if (theme === 'light') {
+            themeIcon.className = 'fas fa-sun';
+        } else {
+            themeIcon.className = 'fas fa-moon';
+        }
+    }
+    
+    showNotification(message, type = 'info', duration = 3000) {
+        const notification = document.createElement('div');
+        notification.className = `notification ${type}`;
+        notification.innerHTML = `
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span><i class="fas fa-${this.getNotificationIcon(type)} me-2"></i>${message}</span>
+                <button onclick="this.parentElement.parentElement.remove()" style="background: none; border: none; color: white; font-size: 1.2rem; cursor: pointer;">&times;</button>
+            </div>
+        `;
+        
+        const container = document.getElementById('notificationContainer');
+        container.appendChild(notification);
+        
+        // Show notification
+        setTimeout(() => notification.classList.add('show'), 100);
+        
+        // Auto-remove notification
+        setTimeout(() => {
+            notification.classList.remove('show');
+            setTimeout(() => notification.remove(), 300);
+        }, duration);
+    }
+    
+    getNotificationIcon(type) {
+        switch(type) {
+            case 'success': return 'check-circle';
+            case 'warning': return 'exclamation-triangle';
+            case 'error': return 'times-circle';
+            default: return 'info-circle';
+        }
+    }
+    
+    initializeTheme() {
+        this.applyTheme(this.currentTheme);
     }
 
     async checkSingleAccount() {
@@ -221,12 +334,12 @@ class ValorantComboChecker {
                 // Start polling for updates
                 this.pollBatchStatus();
                 
-                this.showAlert(`Batch check started! Processing ${result.total_combos} combinations with ${result.max_workers} concurrent threads.`, 'success');
+                this.showNotification(`Batch check started! Processing ${result.total_combos} combinations with ${result.max_workers} concurrent threads.`, 'success');
             } else {
-                this.showAlert(result.error || 'Failed to start batch check', 'danger');
+                this.showNotification(result.error || 'Failed to start batch check', 'error');
             }
         } catch (error) {
-            this.showAlert('Failed to start batch check', 'danger');
+            this.showNotification('Failed to start batch check', 'error');
         } finally {
             spinner.style.display = 'none';
             btnText.textContent = 'Start Batch Check';
@@ -299,6 +412,13 @@ class ValorantComboChecker {
             const elapsedMinutes = (Date.now() - this.startTime) / 60000;
             const checksPerMinute = elapsedMinutes > 0 ? Math.round(progress.current / elapsedMinutes) : 0;
             document.getElementById('checkRate').textContent = checksPerMinute;
+            
+            // Show progress notifications at milestones
+            const progressPercent = Math.round((progress.current / progress.total) * 100);
+            if (progressPercent > 0 && progressPercent % 25 === 0 && !this.lastNotifiedProgress || this.lastNotifiedProgress !== progressPercent) {
+                this.showNotification(`Progress: ${progressPercent}% complete (${progress.current}/${progress.total})`, 'info', 2000);
+                this.lastNotifiedProgress = progressPercent;
+            }
         }
         
         // Update live results
@@ -393,7 +513,7 @@ class ValorantComboChecker {
 
     async exportResults() {
         if (!this.currentSessionId) {
-            this.showAlert('No results to export', 'warning');
+            this.showNotification('No results to export', 'warning');
             return;
         }
 
