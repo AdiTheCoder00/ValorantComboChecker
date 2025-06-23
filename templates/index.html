@@ -408,14 +408,17 @@
                                 
                                 <div class="mb-3">
                                     <label for="delay" class="form-label">Delay Between Checks (seconds)</label>
-                                    <input type="number" class="form-control" id="delay" min="0.1" max="10" step="0.1" value="2.0">
+                                    <input type="number" class="form-control" id="delay" min="1.0" max="10" step="0.1" value="2.0">
+                                    <div class="form-text text-light">
+                                        Minimum 1.0s required for Riot API compliance
+                                    </div>
                                 </div>
                                 
                                 <div class="mb-3">
                                     <label for="maxWorkers" class="form-label">Concurrent Threads (1-20)</label>
-                                    <input type="number" class="form-control" id="maxWorkers" min="1" max="20" value="5">
+                                    <input type="number" class="form-control" id="maxWorkers" min="1" max="20" value="3">
                                     <div class="form-text text-light">
-                                        Higher values = faster checking, but may cause rate limiting
+                                        Recommended: 3-5 threads for Riot API. Higher values may trigger rate limits.
                                     </div>
                                 </div>
                                 

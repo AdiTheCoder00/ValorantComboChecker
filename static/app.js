@@ -282,8 +282,8 @@ class ValorantComboChecker {
         const delay = parseFloat(document.getElementById('delay').value);
         const maxWorkers = parseInt(document.getElementById('maxWorkers').value);
         
-        if (delay < 0.1 || delay > 10) {
-            this.showAlert('Delay must be between 0.1 and 10 seconds', 'warning');
+        if (delay < 1.0 || delay > 10) {
+            this.showAlert('Delay must be between 1.0 and 10 seconds for Riot API compliance', 'warning');
             return;
         }
         

