@@ -935,6 +935,20 @@ def health_check():
     """Health check endpoint for webview"""
     return jsonify({'status': 'healthy', 'message': 'Valorant Combo Checker is running'})
 
+@app.route('/test')
+def test_endpoint():
+    """Simple test endpoint to verify webview connectivity"""
+    return '''
+    <html>
+    <head><title>Valorant Combo Checker - Test</title></head>
+    <body>
+        <h1>✅ Connection Successful!</h1>
+        <p>Your Flask app is running correctly on port 5000.</p>
+        <p><a href="/">Go to Main Application</a></p>
+    </body>
+    </html>
+    '''
+
 @app.route('/api/check_single', methods=['POST'])
 def check_single():
     """API endpoint for single account check"""
@@ -1454,4 +1468,12 @@ def filter_accounts():
         return jsonify({'error': f'Failed to filter accounts: {str(e)}'}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
+    # Ensure proper configuration for Replit webview
+    app.run(
+        host='0.0.0.0', 
+        port=5000, 
+        debug=True, 
+        threaded=True,
+        use_reloader=True,
+        use_debugger=True
+    )
