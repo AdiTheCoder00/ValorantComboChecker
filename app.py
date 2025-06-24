@@ -106,13 +106,16 @@ class ComboChecker:
         self.results = []
         self.start_time = None
         
+        # Initialize rate limiting
+        self.rate_limit_delay = 1.0
+        self.last_request_time = 0
+        
         # Evasion components (conditional)
         if EVASION_AVAILABLE:
             self.evasion_session = None
             self.current_fingerprint = None
             self.request_count = 0
             self.fingerprint_rotation_interval = 25
-            self.rate_limit_delay = 1.0
         
         self.progress = {
             'current': 0, 
@@ -684,7 +687,17 @@ class ComboChecker:
         self.is_checking = True
         self.stop_checking = False
         self.results = []
-        self.progress = {'current': 0, 'total': len(combos)}
+        self.progress = {
+            'current': 0, 
+            'total': len(combos),
+            'rate': 0, 
+            'eta': 0,
+            'valid_count': 0,
+            'invalid_count': 0,
+            'error_count': 0,
+            'success_rate': 0.0
+        }
+        self.session_stats['start_time'] = time.time()
         
         # Create thread pool for parallel processing
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -740,13 +753,15 @@ class ComboChecker:
         """Check a single combo with smart delay management and rate limiting for threading"""
         start_request_time = time.time()
         
-        # Implement smart rate limiting
+        # Implement smart rate limiting with thread safety
         current_time = time.time()
-        if hasattr(self, 'last_request_time'):
-            time_since_last = current_time - self.last_request_time
-            if time_since_last < self.rate_limit_delay:
-                sleep_time = self.rate_limit_delay - time_since_last
-                time.sleep(sleep_time)
+        with self.progress_lock:
+            if hasattr(self, 'last_request_time') and self.last_request_time:
+                time_since_last = current_time - self.last_request_time
+                if time_since_last < getattr(self, 'rate_limit_delay', 1.0):
+                    sleep_time = getattr(self, 'rate_limit_delay', 1.0) - time_since_last
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
         
         # Stagger the start times to avoid overwhelming the server
         if index > 0:
@@ -759,17 +774,25 @@ class ComboChecker:
         # Adaptive rate limiting with optional evasion intelligence
         if result.get('status') == 'rate_limited':
             with self.progress_lock:
-                if EVASION_AVAILABLE and hasattr(self, 'rate_limit_delay'):
-                    self.rate_limit_delay = min(self.rate_limit_delay * 1.8, 15.0)
-                    # Force fingerprint rotation on rate limit
-                    if hasattr(self, 'request_count') and self.request_count > 5:
+                if not hasattr(self, 'rate_limit_delay'):
+                    self.rate_limit_delay = 1.0
+                self.rate_limit_delay = min(self.rate_limit_delay * 1.8, 15.0)
+                
+                if EVASION_AVAILABLE and hasattr(self, 'request_count') and self.request_count > 5:
+                    try:
                         self.current_fingerprint = evasion_engine.rotate_fingerprint()
                         self.evasion_session = evasion_engine.create_evasion_session()
+                        if 'fingerprint_rotations' not in self.session_stats:
+                            self.session_stats['fingerprint_rotations'] = 0
                         self.session_stats['fingerprint_rotations'] += 1
+                    except Exception as e:
+                        logging.warning(f"Fingerprint rotation failed: {e}")
+                        
         elif result.get('status') in ['valid', 'invalid']:
             with self.progress_lock:
-                if EVASION_AVAILABLE and hasattr(self, 'rate_limit_delay'):
-                    self.rate_limit_delay = max(self.rate_limit_delay * 0.9, 1.0)
+                if not hasattr(self, 'rate_limit_delay'):
+                    self.rate_limit_delay = 1.0
+                self.rate_limit_delay = max(self.rate_limit_delay * 0.9, 1.0)
         
         # Track response times for statistics
         response_time = time.time() - start_request_time
@@ -777,16 +800,29 @@ class ComboChecker:
         
         with self.progress_lock:
             self.last_request_time = time.time()
+            
+            # Initialize response_times if not exists
+            if 'response_times' not in self.session_stats:
+                self.session_stats['response_times'] = []
             self.session_stats['response_times'].append(response_time)
             
-            if self.session_stats['fastest_response'] is None or response_time < self.session_stats['fastest_response']:
+            # Update fastest/slowest response times
+            if self.session_stats.get('fastest_response') is None or response_time < self.session_stats['fastest_response']:
                 self.session_stats['fastest_response'] = response_time
-            if self.session_stats['slowest_response'] is None or response_time > self.session_stats['slowest_response']:
+            if self.session_stats.get('slowest_response') is None or response_time > self.session_stats['slowest_response']:
                 self.session_stats['slowest_response'] = response_time
             
             # Update statistics
             if len(self.session_stats['response_times']) > 0:
                 self.session_stats['average_response_time'] = sum(self.session_stats['response_times']) / len(self.session_stats['response_times'])
+            
+            # Initialize progress counters if not exists
+            if 'valid_count' not in self.progress:
+                self.progress['valid_count'] = 0
+            if 'invalid_count' not in self.progress:
+                self.progress['invalid_count'] = 0
+            if 'error_count' not in self.progress:
+                self.progress['error_count'] = 0
             
             # Update progress counters
             if result.get('status') == 'valid':
@@ -796,9 +832,12 @@ class ComboChecker:
             else:
                 self.progress['error_count'] += 1
             
+            # Calculate success rate
             total_checked = self.progress['valid_count'] + self.progress['invalid_count'] + self.progress['error_count']
             if total_checked > 0:
                 self.progress['success_rate'] = (self.progress['valid_count'] / total_checked) * 100
+            else:
+                self.progress['success_rate'] = 0.0
         
         # Apply the main delay between requests
         time.sleep(self.delay)
