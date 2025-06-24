@@ -11,6 +11,7 @@ Unauthorized access to accounts is illegal and violates terms of service.
 from flask import Flask, render_template, request, jsonify, session
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.orm import DeclarativeBase
+from flask_cors import CORS
 import requests
 import time
 import json
@@ -49,6 +50,15 @@ db = SQLAlchemy(model_class=Base)
 
 app = Flask(__name__)
 app.secret_key = 'valorant_combo_checker_secret_key_' + str(uuid.uuid4())
+
+# Enable CORS for all routes to fix webview polling errors
+CORS(app, resources={
+    r"/api/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"]
+    }
+})
 
 # Database configuration
 app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URL")
@@ -920,6 +930,11 @@ def index():
     """Main page"""
     return render_template('index.html')
 
+@app.route('/health')
+def health_check():
+    """Health check endpoint for webview"""
+    return jsonify({'status': 'healthy', 'message': 'Valorant Combo Checker is running'})
+
 @app.route('/api/check_single', methods=['POST'])
 def check_single():
     """API endpoint for single account check"""
@@ -1439,4 +1454,4 @@ def filter_accounts():
         return jsonify({'error': f'Failed to filter accounts: {str(e)}'}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
