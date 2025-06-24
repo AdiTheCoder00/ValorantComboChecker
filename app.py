@@ -750,60 +750,69 @@ class ComboChecker:
         self.is_checking = False
     
     def _check_combo_with_delay(self, username: str, password: str, index: int) -> Dict:
-        """Check a single combo with smart delay management and rate limiting for threading"""
+        """Check a single combo with enhanced rate limiting and thread safety"""
         start_request_time = time.time()
         
-        # Implement smart rate limiting with thread safety
-        current_time = time.time()
-        with self.progress_lock:
-            if hasattr(self, 'last_request_time') and self.last_request_time:
-                time_since_last = current_time - self.last_request_time
-                if time_since_last < getattr(self, 'rate_limit_delay', 1.0):
-                    sleep_time = getattr(self, 'rate_limit_delay', 1.0) - time_since_last
-                    if sleep_time > 0:
-                        time.sleep(sleep_time)
-        
-        # Stagger the start times to avoid overwhelming the server
+        # Stagger initial requests more aggressively to prevent burst
+        initial_stagger = (index % self.max_workers) * 2.0  # 2 seconds between thread starts
         if index > 0:
-            # Add a small random delay based on thread index to spread out requests
-            thread_delay = (index % self.max_workers) * (self.delay / self.max_workers)
-            time.sleep(thread_delay)
+            time.sleep(initial_stagger)
+        
+        # Global rate limiting with exponential backoff
+        with self.progress_lock:
+            current_time = time.time()
+            if hasattr(self, 'last_global_request') and self.last_global_request:
+                time_since_last = current_time - self.last_global_request
+                min_delay = getattr(self, 'global_rate_limit', 3.0)  # Start with 3 second minimum
+                
+                if time_since_last < min_delay:
+                    sleep_time = min_delay - time_since_last
+                    time.sleep(sleep_time)
+            
+            self.last_global_request = time.time()
         
         result = self.check_single_combo(username, password)
         
-        # Adaptive rate limiting with optional evasion intelligence
+        # Enhanced rate limit handling
         if result.get('status') == 'rate_limited':
             with self.progress_lock:
-                if not hasattr(self, 'rate_limit_delay'):
-                    self.rate_limit_delay = 1.0
-                self.rate_limit_delay = min(self.rate_limit_delay * 1.8, 15.0)
+                # Exponential backoff for rate limiting
+                if not hasattr(self, 'global_rate_limit'):
+                    self.global_rate_limit = 3.0
                 
-                if EVASION_AVAILABLE and hasattr(self, 'request_count') and self.request_count > 5:
+                self.global_rate_limit = min(self.global_rate_limit * 2.0, 30.0)  # Max 30 seconds
+                
+                # Log rate limit detection
+                logging.warning(f"Rate limit detected! Increasing delay to {self.global_rate_limit}s")
+                
+                # Force immediate delay for this thread
+                time.sleep(self.global_rate_limit)
+                
+                # Optional fingerprint rotation for evasion
+                if EVASION_AVAILABLE and hasattr(self, 'request_count'):
                     try:
                         self.current_fingerprint = evasion_engine.rotate_fingerprint()
                         self.evasion_session = evasion_engine.create_evasion_session()
-                        if 'fingerprint_rotations' not in self.session_stats:
-                            self.session_stats['fingerprint_rotations'] = 0
-                        self.session_stats['fingerprint_rotations'] += 1
+                        self.session_stats['fingerprint_rotations'] = self.session_stats.get('fingerprint_rotations', 0) + 1
+                        logging.info("Rotated fingerprint due to rate limiting")
                     except Exception as e:
                         logging.warning(f"Fingerprint rotation failed: {e}")
                         
         elif result.get('status') in ['valid', 'invalid']:
+            # Gradually reduce rate limit delay on successful requests
             with self.progress_lock:
-                if not hasattr(self, 'rate_limit_delay'):
-                    self.rate_limit_delay = 1.0
-                self.rate_limit_delay = max(self.rate_limit_delay * 0.9, 1.0)
+                if hasattr(self, 'global_rate_limit') and self.global_rate_limit > 2.0:
+                    self.global_rate_limit = max(self.global_rate_limit * 0.95, 2.0)  # Min 2 seconds
         
-        # Track response times for statistics
+        # Track response times and update statistics
         response_time = time.time() - start_request_time
         result['response_time'] = round(response_time, 2)
         
         with self.progress_lock:
-            self.last_request_time = time.time()
-            
-            # Initialize response_times if not exists
+            # Initialize session stats if needed
             if 'response_times' not in self.session_stats:
                 self.session_stats['response_times'] = []
+            
             self.session_stats['response_times'].append(response_time)
             
             # Update fastest/slowest response times
@@ -812,22 +821,20 @@ class ComboChecker:
             if self.session_stats.get('slowest_response') is None or response_time > self.session_stats['slowest_response']:
                 self.session_stats['slowest_response'] = response_time
             
-            # Update statistics
+            # Calculate average response time
             if len(self.session_stats['response_times']) > 0:
                 self.session_stats['average_response_time'] = sum(self.session_stats['response_times']) / len(self.session_stats['response_times'])
             
-            # Initialize progress counters if not exists
-            if 'valid_count' not in self.progress:
-                self.progress['valid_count'] = 0
-            if 'invalid_count' not in self.progress:
-                self.progress['invalid_count'] = 0
-            if 'error_count' not in self.progress:
-                self.progress['error_count'] = 0
+            # Initialize and update progress counters
+            for key in ['valid_count', 'invalid_count', 'error_count']:
+                if key not in self.progress:
+                    self.progress[key] = 0
             
-            # Update progress counters
-            if result.get('status') == 'valid':
+            # Update progress based on result status
+            status = result.get('status', 'error')
+            if status == 'valid':
                 self.progress['valid_count'] += 1
-            elif result.get('status') == 'invalid':
+            elif status == 'invalid':
                 self.progress['invalid_count'] += 1
             else:
                 self.progress['error_count'] += 1
@@ -839,8 +846,9 @@ class ComboChecker:
             else:
                 self.progress['success_rate'] = 0.0
         
-        # Apply the main delay between requests
-        time.sleep(self.delay)
+        # Apply additional delay with some randomization
+        additional_delay = self.delay + random.uniform(-0.5, 0.5)  # ±0.5s jitter
+        time.sleep(max(0.5, additional_delay))  # Minimum 0.5s delay
             
         return result
     
@@ -941,17 +949,17 @@ def upload_file():
 
 @app.route('/api/start_batch', methods=['POST'])
 def start_batch():
-    """API endpoint to start batch checking with multi-threading and Riot API integration"""
+    """API endpoint to start batch checking with enhanced rate limiting"""
     data = request.get_json()
-    delay = float(data.get('delay', 2.0))
-    max_workers = int(data.get('max_workers', DEFAULT_MAX_WORKERS))
+    delay = float(data.get('delay', 3.0))  # Increased default delay
+    max_workers = int(data.get('max_workers', 2))  # Reduced default workers
     
-    # Validate settings for Riot API compliance
-    max_workers = min(max_workers, MAX_WORKERS_LIMIT)
+    # Stricter validation for Riot API compliance
+    max_workers = min(max_workers, 5)  # Reduced max workers to prevent rate limiting
     max_workers = max(max_workers, 1)
     
-    # Minimum delay for Riot API compliance
-    delay = max(delay, 1.0)
+    # Higher minimum delay for Riot API compliance
+    delay = max(delay, 2.0)  # Minimum 2 seconds
     
     if 'uploaded_file' not in session:
         return jsonify({'error': 'No file uploaded'}), 400
@@ -963,6 +971,13 @@ def start_batch():
     try:
         combos = parse_combo_file(file_path)
         
+        # Limit batch size to prevent overwhelming the API
+        if len(combos) > 100:
+            combos = combos[:100]  # Limit to first 100 combos
+            batch_limited = True
+        else:
+            batch_limited = False
+        
         # Check for demo accounts and mixed content
         demo_count = sum(1 for username, _ in combos if username.lower() in ['demo', 'test', 'sample'] or username.lower().startswith('demo'))
         real_count = len(combos) - demo_count
@@ -970,14 +985,21 @@ def start_batch():
         session_id = str(uuid.uuid4())
         
         checker = ComboChecker(session_id, delay, max_workers)
+        # Initialize global rate limiting
+        checker.global_rate_limit = 3.0
+        checker.last_global_request = 0
+        
         active_sessions[session_id] = checker
         
-        # Start checking in background thread
+        # Start checking in background thread with error handling
         def check_thread():
             try:
+                logging.info(f"Starting batch check with {max_workers} workers, {delay}s delay")
                 checker.check_combo_list(combos)
+                logging.info(f"Batch check completed for session {session_id}")
             except Exception as e:
                 logging.error(f"Batch checking thread error: {e}")
+                checker.is_checking = False
         
         thread = threading.Thread(target=check_thread, daemon=True)
         thread.start()
@@ -989,12 +1011,19 @@ def start_batch():
             'session_id': session_id,
             'total_combos': len(combos),
             'max_workers': max_workers,
-            'delay': delay
+            'delay': delay,
+            'rate_limiting_info': 'Enhanced rate limiting enabled to prevent API restrictions'
         }
         
-        # Add warning if delay was adjusted
-        if delay > float(data.get('delay', 2.0)):
+        # Add warnings and adjustments
+        if delay > float(data.get('delay', 3.0)):
             response_data['warning'] = f'Delay adjusted to {delay}s for Riot API compliance'
+        
+        if max_workers < int(data.get('max_workers', 2)):
+            response_data['worker_warning'] = f'Workers reduced to {max_workers} to prevent rate limiting'
+        
+        if batch_limited:
+            response_data['batch_warning'] = 'Batch limited to 100 combos to prevent rate limiting'
         
         # Add info about demo vs real accounts
         if demo_count > 0:
@@ -1005,39 +1034,74 @@ def start_batch():
         return jsonify(response_data)
         
     except Exception as e:
+        logging.error(f"Error starting batch check: {e}")
         return jsonify({'error': f'Error starting batch check: {str(e)}'}), 500
 
 @app.route('/api/batch_status/<session_id>')
 def batch_status(session_id):
-    """API endpoint to get batch checking status"""
-    if session_id not in active_sessions:
-        return jsonify({'error': 'Session not found'}), 404
-    
-    checker = active_sessions[session_id]
-    
-    # Calculate real-time rate and ETA
-    current_time = time.time()
-    if checker.is_checking and hasattr(checker, 'start_time') and checker.start_time:
-        elapsed = current_time - checker.start_time
-        if elapsed > 0:
-            rate = len(checker.results) / elapsed * 60  # per minute
-            remaining = checker.progress['total'] - checker.progress['current']
-            eta = (remaining / rate * 60) if rate > 0 else 0
-            checker.progress['rate'] = round(rate, 1)
-            checker.progress['eta'] = round(eta)
-    
-    return jsonify({
-        'is_checking': checker.is_checking,
-        'progress': checker.progress,
-        'results': checker.results[-10:] if len(checker.results) > 10 else checker.results,  # Last 10 for live view
-        'total_results': len(checker.results),
-        'completed': not checker.is_checking and checker.progress['current'] > 0,
-        'session_stats': {
-            'fastest_response': round(checker.session_stats['fastest_response'], 2) if checker.session_stats['fastest_response'] else None,
-            'slowest_response': round(checker.session_stats['slowest_response'], 2) if checker.session_stats['slowest_response'] else None,
-            'average_response_time': round(checker.session_stats['average_response_time'], 2)
+    """API endpoint to get batch checking status with error handling"""
+    try:
+        if session_id not in active_sessions:
+            return jsonify({'error': 'Session not found'}), 404
+        
+        checker = active_sessions[session_id]
+        
+        # Calculate real-time rate and ETA with error handling
+        current_time = time.time()
+        rate = 0
+        eta = 0
+        
+        if checker.is_checking and hasattr(checker, 'start_time') and checker.start_time:
+            elapsed = current_time - checker.start_time
+            if elapsed > 0 and len(checker.results) > 0:
+                rate = len(checker.results) / elapsed * 60  # per minute
+                remaining = checker.progress['total'] - checker.progress['current']
+                eta = (remaining / rate * 60) if rate > 0 else 0
+                checker.progress['rate'] = round(rate, 1)
+                checker.progress['eta'] = round(eta)
+        
+        # Get recent results safely
+        recent_results = []
+        try:
+            if len(checker.results) > 10:
+                recent_results = checker.results[-10:]
+            else:
+                recent_results = checker.results[:]
+        except Exception as e:
+            logging.warning(f"Error getting recent results: {e}")
+            recent_results = []
+        
+        # Get session stats safely
+        session_stats = {
+            'fastest_response': None,
+            'slowest_response': None,
+            'average_response_time': 0.0,
+            'current_rate_limit': getattr(checker, 'global_rate_limit', 3.0)
         }
-    })
+        
+        try:
+            if checker.session_stats.get('fastest_response'):
+                session_stats['fastest_response'] = round(checker.session_stats['fastest_response'], 2)
+            if checker.session_stats.get('slowest_response'):
+                session_stats['slowest_response'] = round(checker.session_stats['slowest_response'], 2)
+            if checker.session_stats.get('average_response_time'):
+                session_stats['average_response_time'] = round(checker.session_stats['average_response_time'], 2)
+        except Exception as e:
+            logging.warning(f"Error calculating session stats: {e}")
+        
+        return jsonify({
+            'is_checking': checker.is_checking,
+            'progress': checker.progress,
+            'results': recent_results,
+            'total_results': len(checker.results),
+            'completed': not checker.is_checking and checker.progress['current'] > 0,
+            'session_stats': session_stats,
+            'rate_limiting_active': hasattr(checker, 'global_rate_limit') and checker.global_rate_limit > 3.0
+        })
+        
+    except Exception as e:
+        logging.error(f"Error getting batch status: {e}")
+        return jsonify({'error': f'Error getting status: {str(e)}'}), 500
 
 @app.route('/api/stop_batch/<session_id>', methods=['POST'])
 def stop_batch(session_id):
