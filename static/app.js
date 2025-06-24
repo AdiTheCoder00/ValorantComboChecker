@@ -282,13 +282,13 @@ class ValorantComboChecker {
         const delay = parseFloat(document.getElementById('delay').value);
         const maxWorkers = parseInt(document.getElementById('maxWorkers').value);
         
-        if (delay < 15.0 || delay > 60) {
-            this.showAlert('Delay must be between 15.0 and 60 seconds for Riot API compliance', 'warning');
+        if (delay < 2.0 || delay > 30) {
+            this.showAlert('Delay must be between 2.0 and 30 seconds for optimal performance', 'warning');
             return;
         }
         
-        if (maxWorkers !== 1) {
-            this.showAlert('Only 1 concurrent thread allowed for rate limit compliance', 'warning');
+        if (maxWorkers < 1 || maxWorkers > 5) {
+            this.showAlert('Workers must be between 1-5 for optimal rate limiting', 'warning');
             return;
         }
 
